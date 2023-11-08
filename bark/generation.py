@@ -131,12 +131,11 @@ if not hasattr(torch.nn.functional, 'scaled_dot_product_attention') and torch.cu
 
 def _grab_best_device(use_gpu=True):
     if torch.cuda.device_count() > 0 and use_gpu:
-        device = "cuda"
+        return "cuda"
     elif torch.backends.mps.is_available() and use_gpu and GLOBAL_ENABLE_MPS:
-        device = "mps"
+        return "mps"
     else:
-        device = "cpu"
-    return device
+        return "cpu"
 
 
 def _get_ckpt_path(model_type, use_small=False):
@@ -193,10 +192,7 @@ def clean_models(model_key=None):
 
 
 def _load_model(ckpt_path, device, use_small=False, model_type="text"):
-    if model_type == "text":
-        ConfigClass = GPTConfig
-        ModelClass = GPT
-    elif model_type == "coarse":
+    if model_type in ["text", "coarse"]:
         ConfigClass = GPTConfig
         ModelClass = GPT
     elif model_type == "fine":
@@ -225,12 +221,12 @@ def _load_model(ckpt_path, device, use_small=False, model_type="text"):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
     extra_keys = set(state_dict.keys()) - set(model.state_dict().keys())
-    extra_keys = set([k for k in extra_keys if not k.endswith(".attn.bias")])
+    extra_keys = {k for k in extra_keys if not k.endswith(".attn.bias")}
     missing_keys = set(model.state_dict().keys()) - set(state_dict.keys())
-    missing_keys = set([k for k in missing_keys if not k.endswith(".attn.bias")])
-    if len(extra_keys) != 0:
+    missing_keys = {k for k in missing_keys if not k.endswith(".attn.bias")}
+    if extra_keys:
         raise ValueError(f"extra keys found: {extra_keys}")
-    if len(missing_keys) != 0:
+    if missing_keys:
         raise ValueError(f"missing keys: {missing_keys}")
     model.load_state_dict(state_dict, strict=False)
     n_params = model.get_num_params()
@@ -451,10 +447,7 @@ def generate_text_semantic(
         tot_generated_duration_s = 0
         kv_cache = None
         for n in range(n_tot_steps):
-            if use_kv_caching and kv_cache is not None:
-                x_input = x[:, [-1]]
-            else:
-                x_input = x
+            x_input = x[:, [-1]] if use_kv_caching and kv_cache is not None else x
             logits, kv_cache = model(
                 x_input, merge_context=True, use_cache=use_kv_caching, past_kv=kv_cache
             )
@@ -509,7 +502,7 @@ def generate_text_semantic(
         out = x.detach().cpu().numpy().squeeze()[256 + 256 + 1 :]
     if OFFLOAD_CPU:
         model.to("cpu")
-    assert all(0 <= out) and all(out < SEMANTIC_VOCAB_SIZE)
+    assert all(out >= 0) and all(out < SEMANTIC_VOCAB_SIZE)
     _clear_cuda_cache()
     return out
 
@@ -520,8 +513,7 @@ def _flatten_codebooks(arr, offset_size=CODEBOOK_SIZE):
     if offset_size is not None:
         for n in range(1, arr.shape[0]):
             arr[n, :] += offset_size * n
-    flat_arr = arr.ravel("F")
-    return flat_arr
+    return arr.ravel("F")
 
 
 COARSE_SEMANTIC_PAD_TOKEN = 12_048
@@ -638,11 +630,7 @@ def generate_coarse(
                     continue
                 is_major_step = n_step % N_COARSE_CODEBOOKS == 0
 
-                if use_kv_caching and kv_cache is not None:
-                    x_input = x_in[:, [-1]]
-                else:
-                    x_input = x_in
-
+                x_input = x_in[:, [-1]] if use_kv_caching and kv_cache is not None else x_in
                 logits, kv_cache = model(x_input, use_cache=use_kv_caching, past_kv=kv_cache)
                 logit_start_idx = (
                     SEMANTIC_VOCAB_SIZE + (1 - int(is_major_step)) * CODEBOOK_SIZE
